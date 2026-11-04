@@ -1,3 +1,4 @@
+
 /* SPDX-License-Identifier: GPL-2.0-only */
 
 #include <linux/errno.h>
@@ -109,10 +110,6 @@ static struct ksu_branch_site *ksu_find_site(void *fn)
     return NULL;
 }
 
-/*
- * Patch one or two instruction locations through the KSU-Next
- * fixmap/stop_machine implementation.
- */
 static int ksu_rkp_patch_words(
     void **addresses,
     u32 *instructions,
@@ -134,10 +131,6 @@ static int ksu_rkp_patch_words(
     return ksu_patch_text_batch(entries, count);
 }
 
-/*
- * Write the complete stub before making it reachable from a live
- * kernel function.
- */
 static int ksu_rkp_write_stub(void *stub, const u32 instructions[4])
 {
     struct ksu_patch_entry entry = {
@@ -183,35 +176,28 @@ int ksu_rkp_branch_patch(void *dst, void *src)
 
     mutex_lock(&ksu_site_lock);
 
-    /*
-     * If this function was already patched, restore its original
-     * instructions before installing the replacement.
-     */
     site = ksu_find_site(current_fn);
 
     if (site) {
+        u32 restore_instructions[2];
+
         restore_addresses[0] =
             (u8 *)current_fn + site->preamble_skip * sizeof(u32);
-
         restore_addresses[1] = current_fn;
 
-        {
-            u32 restore_instructions[2];
+        restore_instructions[0] = site->insn_at_patch;
+        restore_instructions[1] = site->insn_at_fn0;
 
-            restore_instructions[0] = site->insn_at_patch;
-            restore_instructions[1] = site->insn_at_fn0;
+        ret = ksu_rkp_patch_words(
+            restore_addresses,
+            restore_instructions,
+            site->insn_at_fn0 ? 2 : 1);
 
-            ret = ksu_rkp_patch_words(
-                restore_addresses,
-                restore_instructions,
-                site->insn_at_fn0 ? 2 : 1);
-
-            if (ret) {
-                mutex_unlock(&ksu_site_lock);
-                pr_err("KSU: RKP restore failed at %pS: %d\n",
-                       current_fn, ret);
-                return ret;
-            }
+        if (ret) {
+            mutex_unlock(&ksu_site_lock);
+            pr_err("KSU: RKP restore failed at %pS: %d\n",
+                   current_fn, ret);
+            return ret;
         }
 
         *site = ksu_sites[--ksu_site_count];
@@ -272,9 +258,6 @@ int ksu_rkp_branch_patch(void *dst, void *src)
     fn0_insn = READ_ONCE(*(u32 *)current_fn);
     insn_at_patch = fn0_insn;
 
-    /*
-     * Preserve BTI/PAC preamble instructions at function entry.
-     */
     while (preamble_skip < 2 &&
            ksu_insn_is_bti_landing_pad(insn_at_patch)) {
         preamble_skip++;
@@ -299,10 +282,6 @@ int ksu_rkp_branch_patch(void *dst, void *src)
         return -EINVAL;
     }
 
-    /*
-     * PACIASP/PACIBSP must not execute before branching to the
-     * replacement function. Preserve a valid BTI landing pad instead.
-     */
     if (preamble_skip > 0 && ksu_insn_is_pac_signing(fn0_insn))
         insn_at_fn0 = fn0_insn;
 
@@ -320,18 +299,15 @@ int ksu_rkp_branch_patch(void *dst, void *src)
     stub_idx = ksu_stub_next;
     stub = (u8 *)ksu_stub_page + stub_idx * KSU_STUB_SIZE;
 
-    /*
-     * Stub layout:
-     * [0] KCFI hash
-     * [1] BTI landing pad
-     * [2] displaced original instruction
-     * [3] branch back to the original function
-     */
     stub_instructions[0] =
         READ_ONCE(*((u32 *)current_fn - 1));
 
+    /*
+     * Preserve the original PAC signing instruction in the callable
+     * stub when the original function entry used PAC.
+     */
     stub_instructions[1] =
-        insn_at_fn0 ? 0xD503245F : 0xD503245F;
+        insn_at_fn0 ? insn_at_fn0 : 0xD503245F;
 
     stub_instructions[2] = insn_at_patch;
 
@@ -345,10 +321,6 @@ int ksu_rkp_branch_patch(void *dst, void *src)
         return -ERANGE;
     }
 
-    /*
-     * The stub is not reachable yet. Write it through the same
-     * KSU-Next patching path used for protected kernel text.
-     */
     ret = ksu_rkp_write_stub(stub, stub_instructions);
 
     if (ret) {
@@ -358,24 +330,19 @@ int ksu_rkp_branch_patch(void *dst, void *src)
         return ret;
     }
 
-    /*
-     * Commit the function-entry and branch changes together.
-     */
     if (insn_at_fn0) {
+        u32 patch_instructions[2] = {
+            0xD503245F,
+            branch_b,
+        };
+
         patch_addresses[0] = current_fn;
         patch_addresses[1] = patch_addr;
 
-        {
-            u32 patch_instructions[2] = {
-                0xD503245F,
-                branch_b,
-            };
-
-            ret = ksu_rkp_patch_words(
-                patch_addresses,
-                patch_instructions,
-                2);
-        }
+        ret = ksu_rkp_patch_words(
+            patch_addresses,
+            patch_instructions,
+            2);
     } else {
         patch_addresses[0] = patch_addr;
 
