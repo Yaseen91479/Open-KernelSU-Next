@@ -26,8 +26,22 @@
 #define KSU_PATCH_TEXT_FLUSH_DCACHE 1
 #define KSU_PATCH_TEXT_FLUSH_ICACHE 2
 
+struct ksu_patch_entry {
+    void *dst;
+    const void *src;
+    size_t len;
+    int flags;
+};
+
 unsigned long phys_from_virt(unsigned long addr, int *err);
+
 int ksu_patch_text(void *dst, void *src, size_t len, int flags);
+
+int ksu_patch_text_batch(
+    const struct ksu_patch_entry *entries,
+    size_t count
+);
+
 void *scan_call_to(void *start, size_t size, void *target);
 
 #endif
